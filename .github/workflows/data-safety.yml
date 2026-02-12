@@ -1,0 +1,34 @@
+name: data-safety
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Block tracked real CSV/XLSX data
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tracked_data="$(git ls-files '*.csv' '*.xlsx' || true)"
+          if [[ -z "${tracked_data}" ]]; then
+            echo "No tracked CSV/XLSX files found."
+            exit 0
+          fi
+
+          disallowed="$(echo "${tracked_data}" | grep -Ev '^templates/[^/]+\.(csv|xlsx)$' || true)"
+          if [[ -n "${disallowed}" ]]; then
+            echo "The following tracked data files are not allowed:"
+            echo "${disallowed}"
+            echo ""
+            echo "Only template CSV/XLSX files in templates/ may be tracked."
+            exit 1
+          fi
+
+          echo "Data safety guard passed."

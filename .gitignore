@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Local planner artifacts
+state.json
+*.state.json
+outputs/
+data/
+*.csv
+*.xlsx
+*_selected.csv
+*_waitlist.csv
+*_attended.csv
+*_no_show.csv
+*.local.csv
+*.local.xlsx
+~$*.xlsx
+
+# Keep tracked templates
+!templates/
+!templates/*.csv
+!templates/*.xlsx
