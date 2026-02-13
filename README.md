@@ -2,6 +2,9 @@
 i made this to plan lunches with a number of hosts and guests to keep it fair.
 It invites from one workbook and one seed key.
 
+Math specification:
+- Math explanation (PDF): [docs/explanation.pdf](docs/explanation.pdf)
+
 ## Equity rules considered
 
 - Rotation fairness: fewer prior assignments are favored.
@@ -45,9 +48,6 @@ In the GUI:
 - Waitlist guest outcomes: `Filled In`, `Can't Attend`, `No Show`.
 - Checkbox edits are written to `lunch_plan.csv` immediately.
 - `Reset All Data` deletes both `state.json` and `lunch_plan.csv` so you can restart cleanly.
-
-Math specification:
-- Math explanation (PDF): [docs/explanation.pdf](docs/explanation.pdf)
 
 Writes:
 - `data/lunch_plan.csv`
