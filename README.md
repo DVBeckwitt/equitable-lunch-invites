@@ -63,3 +63,42 @@ Default demographic mode: `women_to_parity`.
 2. Run `plan` again (omit `--event-index` to auto-advance).
 
 The planner reads prior attendance from the same CSV before selecting the next event.
+
+## Representation trials (tests)
+
+Run:
+
+```bash
+pytest -q -k representation_trials
+```
+
+The mock guest rosters assume ~12 women per 60 men (16.7% women), randomly distributed across disciplines (at least 1 woman and 1 man per discipline), with varying discipline sizes by scenario.
+
+Writes:
+- `data/representation_artifacts/representation_trials.csv`
+- `data/representation_artifacts/representation_trials_summary.csv`
+- `data/representation_artifacts/representation_trials_report.md`
+- `data/representation_artifacts/representation_trials_disciplines.csv`
+- `data/representation_artifacts/representation_trials.png` (if `matplotlib` is installed)
+- `data/representation_artifacts/representation_disciplines.png` (if `matplotlib` is installed)
+- `data/representation_artifacts/representation_metric_<metric>__<mode>.png` (one metrics panel per file)
+- `data/representation_artifacts/representation_discipline_share_ratio__<scenario>__<mode>.png` (one discipline panel per file)
+
+Optional environment overrides:
+- `EQUITABLE_TRIALS` (default: 40)
+- `EQUITABLE_TOTAL_EVENTS` (default: 12)
+- `EQUITABLE_GUESTS_PER_EVENT` (default: 5)
+- `EQUITABLE_HOSTS_PER_EVENT` (default: 1)
+- `EQUITABLE_ARTIFACT_DIR` (default: `data/representation_artifacts`)
+- `EQUITABLE_LATEX_FIGURE_DIR` (optional: mirrors `representation_trials.png` and `representation_disciplines.png` to this directory for `\includegraphics{...}` in LaTeX)
+
+For a LaTeX file that references:
+- `\includegraphics{representation_trials.png}`
+- `\includegraphics{representation_disciplines.png}`
+
+run the trials with the LaTeX file directory as the mirror target, for example:
+
+```powershell
+$env:EQUITABLE_LATEX_FIGURE_DIR = "."
+pytest -q -k representation_trials
+```
