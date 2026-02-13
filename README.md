@@ -1,6 +1,6 @@
 # equitable-lunch-invites
-
-Plan host/guest lunch invites from one workbook and one seed key.
+i made this to plan lunches with a number of hosts and guests to keep it fair.
+It invites from one workbook and one seed key.
 
 ## Equity rules considered
 
