@@ -136,17 +136,24 @@ def apply_role_outcomes(
     role: str,
     attended: list[str],
     no_show: list[str],
+    cant_attend: list[str] | None = None,
 ) -> None:
     bucket = get_role_bucket(state, role)
     attended_set = set(attended)
     no_show_set = set(no_show)
+    cant_attend_set = set(cant_attend or [])
     overlap = attended_set & no_show_set
     if overlap:
         raise ValueError(
             f"Names listed in both attended and no_show for role '{role}': {sorted(overlap)[:10]}"
         )
+    overlap_cant_attend = (attended_set & cant_attend_set) | (no_show_set & cant_attend_set)
+    if overlap_cant_attend:
+        raise ValueError(
+            f"Names listed in multiple outcomes for role '{role}': {sorted(overlap_cant_attend)[:10]}"
+        )
 
-    unknown = sorted((attended_set | no_show_set) - set(bucket.keys()))
+    unknown = sorted((attended_set | no_show_set | cant_attend_set) - set(bucket.keys()))
     if unknown:
         raise ValueError(f"Unknown names in {role} outcome files: {unknown[:10]}")
 
@@ -161,3 +168,5 @@ def apply_role_outcomes(
         stats.no_show_count += 1
         stats.cooldown = max(stats.cooldown, 1)
         bucket[name] = stats.to_mapping()
+
+    # "can't attend" is tracked as acknowledged non-attendance with no no-show penalty.

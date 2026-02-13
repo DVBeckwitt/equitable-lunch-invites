@@ -6,6 +6,9 @@ from collections import Counter
 from typing import Any
 
 from equitable_lunch_invites.models import (
+    DEFAULT_DEMOGRAPHIC_MODE,
+    DEMOGRAPHIC_MODE_PROPORTIONAL,
+    DEMOGRAPHIC_MODE_WOMEN_TO_PARITY,
     DISCIPLINES,
     EventPlan,
     Participant,
@@ -30,6 +33,36 @@ def _name_sort_key(name: str) -> tuple[int, Any]:
     if name.isdigit():
         return (0, int(name))
     return (1, name.lower())
+
+
+def _normalize_token(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def apply_demographic_mode(
+    demographic_counts: dict[str, int],
+    demographic_column: str,
+    demographic_mode: str = DEFAULT_DEMOGRAPHIC_MODE,
+) -> dict[str, int]:
+    mode = _normalize_token(demographic_mode)
+    out = {str(key): max(0, int(value)) for key, value in demographic_counts.items()}
+
+    if mode == DEMOGRAPHIC_MODE_PROPORTIONAL:
+        return out
+
+    if mode == DEMOGRAPHIC_MODE_WOMEN_TO_PARITY:
+        if _normalize_token(demographic_column) != "sex":
+            return out
+        women = int(out.get("F", 0))
+        men = int(out.get("M", 0))
+        if women > 0 and men > 0 and women < men:
+            out["F"] = men
+        return out
+
+    raise ValueError(
+        f"Unknown demographic mode '{demographic_mode}'. "
+        f"Expected one of: {DEMOGRAPHIC_MODE_PROPORTIONAL}, {DEMOGRAPHIC_MODE_WOMEN_TO_PARITY}"
+    )
 
 
 def allocate_counts_proportional(
@@ -354,6 +387,8 @@ def choose_guest_cohort(
     guest_bucket: dict[str, dict[str, int]],
     max_unique: int,
     cohort_seed: int,
+    demographic_column: str,
+    demographic_mode: str,
 ) -> list[str]:
     if not roster:
         return []
@@ -392,9 +427,14 @@ def choose_guest_cohort(
     )
 
     demographic_counts = Counter(participant.demographic or "U" for participant in roster)
+    demographic_weights = apply_demographic_mode(
+        demographic_counts={key: int(value) for key, value in demographic_counts.items()},
+        demographic_column=demographic_column,
+        demographic_mode=demographic_mode,
+    )
     demographic_targets = allocate_counts_proportional(
         total=cohort_size,
-        weights={key: int(value) for key, value in demographic_counts.items()},
+        weights=demographic_weights,
         minimums={key: 0 for key in demographic_counts},
         caps={key: int(value) for key, value in demographic_counts.items()},
         rng=rng,
@@ -482,8 +522,18 @@ def plan_event(
         raise ValueError("State _meta field must be a JSON object.")
     meta["schema_version"] = STATE_SCHEMA_VERSION
     meta["guest_demographic_column"] = config.guest_demographic_column
+    meta["demographic_mode"] = config.demographic_mode
 
-    guest_lookup = {participant.name: participant for participant in guest_roster}
+    host_names = {participant.name for participant in host_roster}
+    eligible_guest_roster = [
+        participant for participant in guest_roster if participant.name not in host_names
+    ]
+    if not eligible_guest_roster:
+        raise ValueError(
+            "No eligible guests remain after excluding hosts from the guest roster."
+        )
+
+    guest_lookup = {participant.name: participant for participant in eligible_guest_roster}
     guest_cohort = meta.get("guest_cohort", [])
     needs_new_cohort = (
         not isinstance(guest_cohort, list)
@@ -493,10 +543,12 @@ def plan_event(
     )
     if needs_new_cohort:
         guest_cohort = choose_guest_cohort(
-            roster=guest_roster,
+            roster=eligible_guest_roster,
             guest_bucket=guest_bucket,
             max_unique=config.guest_max_unique,
             cohort_seed=config.cohort_seed,
+            demographic_column=config.guest_demographic_column,
+            demographic_mode=config.demographic_mode,
         )
         meta["guest_cohort"] = guest_cohort
         meta["guest_max_unique"] = config.guest_max_unique
@@ -506,11 +558,18 @@ def plan_event(
     host_pool = eligible_pool_with_cooldown_override(host_roster, host_bucket)
     guest_pool = eligible_pool_with_cooldown_override(cohort_participants, guest_bucket)
 
-    guest_demographic_counts = Counter(participant.demographic or "U" for participant in guest_roster)
+    guest_demographic_counts = Counter(
+        participant.demographic or "U" for participant in eligible_guest_roster
+    )
+    guest_demographic_weights = apply_demographic_mode(
+        demographic_counts={key: int(value) for key, value in guest_demographic_counts.items()},
+        demographic_column=config.guest_demographic_column,
+        demographic_mode=config.demographic_mode,
+    )
     guest_targets = demographic_targets_for_event(
         event_index=config.event_index,
         seats_per_event=config.guests_per_event,
-        demographic_counts={key: int(value) for key, value in guest_demographic_counts.items()},
+        demographic_counts=guest_demographic_weights,
     )
 
     host_rng = random.Random((config.seed * 17) + 3)
@@ -543,6 +602,8 @@ def plan_event(
         "hosts_per_event": config.hosts_per_event,
         "guests_per_event": config.guests_per_event,
         "guest_demographic_column": config.guest_demographic_column,
+        "demographic_mode": config.demographic_mode,
+        "guest_demographic_weights": guest_demographic_weights,
         "guest_demographic_targets": guest_targets,
         "selected_guest_demographic_counts": dict(selected_guest_demographics),
         "selected_hosts": [participant.name for participant in selected_hosts],

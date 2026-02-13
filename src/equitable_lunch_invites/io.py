@@ -8,6 +8,19 @@ from typing import Iterable
 from equitable_lunch_invites.models import DISCIPLINE_ALIASES, DISCIPLINES, Participant
 
 ANONYMOUS_GUEST_DISCIPLINE = "guest pool"
+PLAN_CSV_HEADER = [
+    "event_index",
+    "role",
+    "status",
+    "name",
+    "discipline",
+    "demographic",
+    "attendance",
+]
+PLAN_ROLE_HOST = "host"
+PLAN_ROLE_GUEST = "guest"
+PLAN_STATUS_SELECTED = "selected"
+PLAN_STATUS_WAITLIST = "waitlist"
 
 
 def round_half_up(value: float) -> int:
@@ -68,13 +81,34 @@ def normalize_outcome(value: str) -> str:
         "n",
         "ns",
     }
+    cant_attend_tokens = {
+        "cant attend",
+        "can't attend",
+        "cannot attend",
+        "declined",
+        "decline",
+        "not available",
+        "unavailable",
+    }
+    filled_tokens = {
+        "filled",
+        "filled in",
+        "fill in",
+        "replacement",
+        "waitlist filled",
+    }
 
     if token in attended_tokens:
         return "attended"
     if token in no_show_tokens:
         return "no_show"
+    if token in cant_attend_tokens:
+        return "cant_attend"
+    if token in filled_tokens:
+        return "filled"
     raise ValueError(
-        f"Unknown guest outcome value '{value}'. Use attended or no_show (or leave blank)."
+        f"Unknown guest outcome value '{value}'. "
+        "Use attended/no_show/cant_attend/filled (or leave blank)."
     )
 
 
@@ -191,6 +225,17 @@ def _ensure_unique_names(participants: Iterable[Participant], label: str) -> Non
         raise ValueError(f"Duplicate names in {label} roster: {preview}")
 
 
+def _distribute_missing_disciplines_evenly(raw_disciplines: list[str]) -> list[str]:
+    distributed = list(raw_disciplines)
+    missing_indices = [index for index, value in enumerate(raw_disciplines) if not value.strip()]
+    if not missing_indices:
+        return distributed
+
+    for offset, row_index in enumerate(missing_indices):
+        distributed[row_index] = DISCIPLINES[offset % len(DISCIPLINES)]
+    return distributed
+
+
 def load_host_roster(path: Path, sheet_name: str | None = None) -> list[Participant]:
     fieldnames, rows = read_table_dict(path, sheet_name=sheet_name)
     if not fieldnames:
@@ -198,18 +243,26 @@ def load_host_roster(path: Path, sheet_name: str | None = None) -> list[Particip
     columns = _column_map(fieldnames)
     _validate_columns(columns, ["name", "discipline"], "Host roster")
 
-    out: list[Participant] = []
+    prepared: list[tuple[str, str]] = []
     for row in rows:
         name = (row.get(columns["name"]) or "").strip()
         discipline = normalize_discipline(row.get(columns["discipline"]) or "")
         if not name:
             continue
-        if discipline not in DISCIPLINES:
+        if discipline and discipline not in DISCIPLINES:
             raise ValueError(
                 f"Unknown discipline '{discipline}' for host '{name}'. "
                 f"Allowed disciplines: {DISCIPLINES}"
             )
-        out.append(Participant(name=name, discipline=discipline))
+        prepared.append((name, discipline))
+
+    distributed_disciplines = _distribute_missing_disciplines_evenly(
+        [discipline for _, discipline in prepared]
+    )
+    out = [
+        Participant(name=name, discipline=distributed_disciplines[index])
+        for index, (name, _) in enumerate(prepared)
+    ]
 
     _ensure_unique_names(out, "host")
     if not out:
@@ -235,7 +288,7 @@ def load_guest_roster(
         required_columns.append(outcome_key)
     _validate_columns(columns, required_columns, "Guest roster")
 
-    out: list[Participant] = []
+    prepared: list[tuple[str, str, str]] = []
     for row in rows:
         name = (row.get(columns["name"]) or "").strip()
         discipline = normalize_discipline(row.get(columns["discipline"]) or "")
@@ -243,14 +296,26 @@ def load_guest_roster(
         demographic = normalize_sex(raw_demographic) if demographic_key == "sex" else normalize_demographic(raw_demographic)
         if not name:
             continue
-        if discipline not in DISCIPLINES:
+        if discipline and discipline not in DISCIPLINES:
             raise ValueError(
                 f"Unknown discipline '{discipline}' for guest '{name}'. "
                 f"Allowed disciplines: {DISCIPLINES}"
             )
         if outcome_key:
             normalize_outcome(row.get(columns[outcome_key]) or "")
-        out.append(Participant(name=name, discipline=discipline, demographic=demographic))
+        prepared.append((name, discipline, demographic))
+
+    distributed_disciplines = _distribute_missing_disciplines_evenly(
+        [discipline for _, discipline, _ in prepared]
+    )
+    out = [
+        Participant(
+            name=name,
+            discipline=distributed_disciplines[index],
+            demographic=demographic,
+        )
+        for index, (name, _, demographic) in enumerate(prepared)
+    ]
 
     _ensure_unique_names(out, "guest")
     if not out:
@@ -479,3 +544,171 @@ def write_participant_list(
             if normalized_demo_header:
                 row.append(participant.demographic or "")
             writer.writerow(row)
+
+
+def _normalize_plan_role(value: str) -> str:
+    token = normalize_header(value)
+    if token in {"host", "hosts"}:
+        return PLAN_ROLE_HOST
+    if token in {"guest", "guests"}:
+        return PLAN_ROLE_GUEST
+    raise ValueError(f"Unknown plan CSV role '{value}'. Use host or guest.")
+
+
+def _normalize_plan_status(value: str) -> str:
+    token = normalize_header(value)
+    if token == PLAN_STATUS_SELECTED:
+        return PLAN_STATUS_SELECTED
+    if token == PLAN_STATUS_WAITLIST:
+        return PLAN_STATUS_WAITLIST
+    raise ValueError(f"Unknown plan CSV status '{value}'. Use selected or waitlist.")
+
+
+def _parse_event_index(raw_value: str) -> int:
+    token = (raw_value or "").strip()
+    try:
+        value = int(token)
+    except ValueError as exc:
+        raise ValueError(f"Invalid event_index '{raw_value}' in plan CSV.") from exc
+    if value <= 0:
+        raise ValueError(f"event_index must be >= 1 in plan CSV, got '{raw_value}'.")
+    return value
+
+
+def _read_existing_plan_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [name for name in (reader.fieldnames or []) if name]
+        if not fieldnames:
+            return []
+
+        columns = _column_map(fieldnames)
+        _validate_columns(
+            columns,
+            [normalize_header(name) for name in PLAN_CSV_HEADER],
+            "Plan",
+        )
+        rows = [{key: (value or "").strip() for key, value in row.items()} for row in reader]
+    return rows
+
+
+def read_plan_attendance(
+    path: Path,
+    event_index: int,
+    role: str,
+    status: str = PLAN_STATUS_SELECTED,
+) -> dict[str, str]:
+    normalized_role = _normalize_plan_role(role)
+    normalized_status = _normalize_plan_status(status)
+    target_event = int(event_index)
+    if target_event <= 0:
+        raise ValueError("event_index must be >= 1.")
+
+    rows = _read_existing_plan_rows(path)
+    attendance_by_name: dict[str, str] = {}
+    for row in rows:
+        row_event = _parse_event_index(row.get("event_index", ""))
+        if row_event != target_event:
+            continue
+        if _normalize_plan_role(row.get("role", "")) != normalized_role:
+            continue
+        if _normalize_plan_status(row.get("status", "")) != normalized_status:
+            continue
+
+        name = (row.get("name") or "").strip()
+        if not name:
+            continue
+        if name in attendance_by_name:
+            raise ValueError(
+                f"Duplicate {normalized_role} '{name}' in event {target_event} plan rows."
+            )
+        attendance_by_name[name] = normalize_outcome(row.get("attendance") or "")
+    return attendance_by_name
+
+
+def _participant_rows(
+    event_index: int,
+    role: str,
+    status: str,
+    participants: list[Participant],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for participant in participants:
+        rows.append(
+            {
+                "event_index": str(event_index),
+                "role": role,
+                "status": status,
+                "name": participant.name,
+                "discipline": participant.discipline,
+                "demographic": participant.demographic or "",
+                "attendance": "",
+            }
+        )
+    return rows
+
+
+def upsert_event_plan_csv(
+    path: Path,
+    event_index: int,
+    selected_hosts: list[Participant],
+    waitlist_hosts: list[Participant],
+    selected_guests: list[Participant],
+    waitlist_guests: list[Participant],
+) -> None:
+    target_event = int(event_index)
+    if target_event <= 0:
+        raise ValueError("event_index must be >= 1.")
+
+    existing_rows = _read_existing_plan_rows(path)
+    previous_attendance: dict[tuple[str, str, str], str] = {}
+    kept_rows: list[dict[str, str]] = []
+    for row in existing_rows:
+        row_event = _parse_event_index(row.get("event_index", ""))
+        role = _normalize_plan_role(row.get("role", ""))
+        status = _normalize_plan_status(row.get("status", ""))
+        name = (row.get("name") or "").strip()
+        if row_event == target_event and name:
+            previous_attendance[(role, status, name)] = normalize_outcome(row.get("attendance") or "")
+            continue
+        kept_rows.append(
+            {
+                "event_index": str(row_event),
+                "role": role,
+                "status": status,
+                "name": name,
+                "discipline": (row.get("discipline") or "").strip(),
+                "demographic": (row.get("demographic") or "").strip(),
+                "attendance": normalize_outcome(row.get("attendance") or ""),
+            }
+        )
+
+    new_rows = (
+        _participant_rows(target_event, PLAN_ROLE_HOST, PLAN_STATUS_SELECTED, selected_hosts)
+        + _participant_rows(target_event, PLAN_ROLE_HOST, PLAN_STATUS_WAITLIST, waitlist_hosts)
+        + _participant_rows(target_event, PLAN_ROLE_GUEST, PLAN_STATUS_SELECTED, selected_guests)
+        + _participant_rows(target_event, PLAN_ROLE_GUEST, PLAN_STATUS_WAITLIST, waitlist_guests)
+    )
+    for row in new_rows:
+        key = (row["role"], row["status"], row["name"])
+        row["attendance"] = previous_attendance.get(key, "")
+
+    all_rows = kept_rows + new_rows
+    status_order = {PLAN_STATUS_SELECTED: 0, PLAN_STATUS_WAITLIST: 1}
+    role_order = {PLAN_ROLE_HOST: 0, PLAN_ROLE_GUEST: 1}
+    all_rows.sort(
+        key=lambda row: (
+            _parse_event_index(row.get("event_index", "")),
+            status_order.get(row.get("status", ""), 99),
+            role_order.get(row.get("role", ""), 99),
+            (row.get("name") or "").casefold(),
+        )
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PLAN_CSV_HEADER)
+        writer.writeheader()
+        writer.writerows(all_rows)

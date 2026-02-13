@@ -8,22 +8,13 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from equitable_lunch_invites.cli import main as cli_main
-
-
-def write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(header)
-        writer.writerows(rows)
-
-
-def read_column(path: Path, column: str) -> list[str]:
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        return [row[column] for row in reader if row.get(column)]
+from equitable_lunch_invites.io import load_guest_roster, load_host_roster, normalize_outcome
+from equitable_lunch_invites.models import DEMOGRAPHIC_MODE_PROPORTIONAL, DEMOGRAPHIC_MODE_WOMEN_TO_PARITY
+from equitable_lunch_invites.models import DISCIPLINES
+from equitable_lunch_invites.selection import apply_demographic_mode, demographic_targets_for_event
 
 
 def run_cli(args: list[str]) -> None:
@@ -31,575 +22,7 @@ def run_cli(args: list[str]) -> None:
     assert exit_code == 0
 
 
-def make_host_roster(path: Path) -> None:
-    rows = [
-        ["Host A", "biophysics"],
-        ["Host B", "astronomy"],
-        ["Host C", "condensed matter experimental"],
-        ["Host D", "condensed matter theory"],
-        ["Host E", "biophysics"],
-        ["Host F", "astronomy"],
-    ]
-    write_csv(path, ["Name", "Discipline"], rows)
-
-
-def make_guest_roster(path: Path, demographic_column: str = "Sex") -> None:
-    rows = [
-        ["Guest A", "biophysics", "F", ""],
-        ["Guest B", "astronomy", "M", ""],
-        ["Guest C", "condensed matter experimental", "F", ""],
-        ["Guest D", "condensed matter theory", "M", ""],
-        ["Guest E", "biophysics", "F", ""],
-        ["Guest F", "astronomy", "M", ""],
-        ["Guest G", "condensed matter experimental", "F", ""],
-        ["Guest H", "condensed matter theory", "M", ""],
-        ["Guest I", "biophysics", "F", ""],
-        ["Guest J", "astronomy", "U", ""],
-    ]
-    write_csv(path, ["Name", "Discipline", demographic_column, "Outcome"], rows)
-
-
-def set_guest_outcomes_csv(
-    path: Path,
-    attended: list[str],
-    no_show: list[str],
-    outcome_column: str = "Outcome",
-) -> None:
-    attended_set = set(attended)
-    no_show_set = set(no_show)
-    overlap = attended_set & no_show_set
-    if overlap:
-        raise ValueError(f"Guest names cannot be both attended and no_show: {sorted(overlap)}")
-
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        rows = list(reader)
-        fieldnames = reader.fieldnames or []
-
-    if "Name" not in fieldnames:
-        raise ValueError("Guest roster must include Name column.")
-    if outcome_column not in fieldnames:
-        raise ValueError(f"Guest roster must include {outcome_column} column.")
-
-    known_names = {row["Name"] for row in rows if row.get("Name")}
-    unknown = sorted((attended_set | no_show_set) - known_names)
-    if unknown:
-        raise ValueError(f"Unknown guest names for outcome update: {unknown}")
-
-    for row in rows:
-        name = (row.get("Name") or "").strip()
-        if name in attended_set:
-            row[outcome_column] = "attended"
-        elif name in no_show_set:
-            row[outcome_column] = "no_show"
-        else:
-            row[outcome_column] = ""
-
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def test_plan_selects_counts_and_is_deterministic(tmp_path: Path) -> None:
-    host_roster = tmp_path / "hosts.csv"
-    guest_roster = tmp_path / "guests.csv"
-    state_path = tmp_path / "state.json"
-    make_host_roster(host_roster)
-    make_guest_roster(guest_roster)
-
-    run_cli(
-        [
-            "init",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-        ]
-    )
-
-    host_out_1 = tmp_path / "host_out_1.csv"
-    host_wait_1 = tmp_path / "host_wait_1.csv"
-    guest_out_1 = tmp_path / "guest_out_1.csv"
-    guest_wait_1 = tmp_path / "guest_wait_1.csv"
-    plan_args = [
-        "plan",
-        "--host-roster",
-        str(host_roster),
-        "--guest-roster",
-        str(guest_roster),
-        "--state",
-        str(state_path),
-        "--event-index",
-        "1",
-        "--seed",
-        "12345",
-        "--cohort-seed",
-        "777",
-        "--hosts-per-event",
-        "2",
-        "--guests-per-event",
-        "5",
-        "--guest-max-unique",
-        "8",
-        "--total-events",
-        "5",
-        "--host-out",
-        str(host_out_1),
-        "--host-wait",
-        str(host_wait_1),
-        "--guest-out",
-        str(guest_out_1),
-        "--guest-wait",
-        str(guest_wait_1),
-    ]
-    run_cli(plan_args)
-
-    hosts_1 = read_column(host_out_1, "name")
-    guests_1 = read_column(guest_out_1, "name")
-    assert len(hosts_1) == 2
-    assert len(guests_1) == 5
-
-    host_out_2 = tmp_path / "host_out_2.csv"
-    host_wait_2 = tmp_path / "host_wait_2.csv"
-    guest_out_2 = tmp_path / "guest_out_2.csv"
-    guest_wait_2 = tmp_path / "guest_wait_2.csv"
-    run_cli(
-        plan_args[:-8]
-        + [
-            "--host-out",
-            str(host_out_2),
-            "--host-wait",
-            str(host_wait_2),
-            "--guest-out",
-            str(guest_out_2),
-            "--guest-wait",
-            str(guest_wait_2),
-        ]
-    )
-
-    assert hosts_1 == read_column(host_out_2, "name")
-    assert guests_1 == read_column(guest_out_2, "name")
-
-
-def test_guest_unique_cap_across_events(tmp_path: Path) -> None:
-    host_roster = tmp_path / "hosts.csv"
-    guest_roster = tmp_path / "guests.csv"
-    state_path = tmp_path / "state.json"
-    make_host_roster(host_roster)
-    make_guest_roster(guest_roster)
-
-    run_cli(
-        [
-            "init",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-        ]
-    )
-
-    all_selected: set[str] = set()
-    for event_index in (1, 2):
-        guest_out = tmp_path / f"guest_out_{event_index}.csv"
-        run_cli(
-            [
-                "plan",
-                "--host-roster",
-                str(host_roster),
-                "--guest-roster",
-                str(guest_roster),
-                "--state",
-                str(state_path),
-                "--event-index",
-                str(event_index),
-                "--seed",
-                str(2000 + event_index),
-                "--cohort-seed",
-                "123",
-                "--hosts-per-event",
-                "1",
-                "--guests-per-event",
-                "3",
-                "--guest-max-unique",
-                "4",
-                "--total-events",
-                "5",
-                "--host-out",
-                str(tmp_path / f"host_out_{event_index}.csv"),
-                "--host-wait",
-                str(tmp_path / f"host_wait_{event_index}.csv"),
-                "--guest-out",
-                str(guest_out),
-                "--guest-wait",
-                str(tmp_path / f"guest_wait_{event_index}.csv"),
-            ]
-        )
-        all_selected.update(read_column(guest_out, "name"))
-
-    assert len(all_selected) <= 4
-
-
-def test_hosts_auto_attend_and_guest_outcomes_from_roster(tmp_path: Path) -> None:
-    host_roster = tmp_path / "hosts.csv"
-    guest_roster = tmp_path / "guests.csv"
-    state_path = tmp_path / "state.json"
-    make_host_roster(host_roster)
-    make_guest_roster(guest_roster)
-
-    run_cli(
-        [
-            "init",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-        ]
-    )
-
-    host_out = tmp_path / "host_out.csv"
-    guest_out = tmp_path / "guest_out.csv"
-    run_cli(
-        [
-            "plan",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-            "--event-index",
-            "1",
-            "--seed",
-            "88",
-            "--cohort-seed",
-            "11",
-            "--hosts-per-event",
-            "2",
-            "--guests-per-event",
-            "3",
-            "--total-events",
-            "5",
-            "--host-out",
-            str(host_out),
-            "--host-wait",
-            str(tmp_path / "host_wait.csv"),
-            "--guest-out",
-            str(guest_out),
-            "--guest-wait",
-            str(tmp_path / "guest_wait.csv"),
-        ]
-    )
-
-    selected_hosts = read_column(host_out, "name")
-    selected_guests = read_column(guest_out, "name")
-    set_guest_outcomes_csv(guest_roster, attended=selected_guests[:2], no_show=[selected_guests[2]])
-
-    run_cli(
-        [
-            "record",
-            "--state",
-            str(state_path),
-            "--event-index",
-            "1",
-            "--guest-roster",
-            str(guest_roster),
-        ]
-    )
-
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    for host_name in selected_hosts:
-        assert state["hosts"][host_name]["assigned_count"] == 1
-    assert state["guests"][selected_guests[2]]["no_show_count"] == 1
-    assert state["guests"][selected_guests[2]]["cooldown"] == 1
-
-
-def test_cooldown_override_preserves_coverage(tmp_path: Path) -> None:
-    host_roster = tmp_path / "hosts.csv"
-    guest_roster = tmp_path / "guests.csv"
-    state_path = tmp_path / "state.json"
-    write_csv(host_roster, ["Name", "Discipline"], [["Host One", "biophysics"]])
-    write_csv(
-        guest_roster,
-        ["Name", "Discipline", "Sex", "Outcome"],
-        [
-            ["Unique Astro", "astronomy", "F", ""],
-            ["Bio 1", "biophysics", "M", ""],
-            ["CME 1", "condensed matter experimental", "F", ""],
-            ["CMT 1", "condensed matter theory", "M", ""],
-            ["Bio 2", "biophysics", "F", ""],
-            ["CME 2", "condensed matter experimental", "M", ""],
-        ],
-    )
-
-    run_cli(
-        [
-            "init",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-        ]
-    )
-
-    guest_out_1 = tmp_path / "guest_out_1.csv"
-    run_cli(
-        [
-            "plan",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-            "--event-index",
-            "1",
-            "--seed",
-            "11",
-            "--cohort-seed",
-            "22",
-            "--hosts-per-event",
-            "0",
-            "--guests-per-event",
-            "4",
-            "--guest-max-unique",
-            "6",
-            "--total-events",
-            "2",
-            "--host-out",
-            str(tmp_path / "host_out_1.csv"),
-            "--host-wait",
-            str(tmp_path / "host_wait_1.csv"),
-            "--guest-out",
-            str(guest_out_1),
-            "--guest-wait",
-            str(tmp_path / "guest_wait_1.csv"),
-        ]
-    )
-
-    selected_event_1 = read_column(guest_out_1, "name")
-    assert "Unique Astro" in selected_event_1
-
-    attended_guests = [name for name in selected_event_1 if name != "Unique Astro"]
-    set_guest_outcomes_csv(guest_roster, attended=attended_guests, no_show=["Unique Astro"])
-    run_cli(
-        [
-            "record",
-            "--state",
-            str(state_path),
-            "--event-index",
-            "1",
-            "--guest-roster",
-            str(guest_roster),
-        ]
-    )
-
-    guest_out_2 = tmp_path / "guest_out_2.csv"
-    run_cli(
-        [
-            "plan",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-            "--event-index",
-            "2",
-            "--seed",
-            "11",
-            "--cohort-seed",
-            "22",
-            "--hosts-per-event",
-            "0",
-            "--guests-per-event",
-            "4",
-            "--guest-max-unique",
-            "6",
-            "--total-events",
-            "2",
-            "--host-out",
-            str(tmp_path / "host_out_2.csv"),
-            "--host-wait",
-            str(tmp_path / "host_wait_2.csv"),
-            "--guest-out",
-            str(guest_out_2),
-            "--guest-wait",
-            str(tmp_path / "guest_wait_2.csv"),
-        ]
-    )
-    assert "Unique Astro" in read_column(guest_out_2, "name")
-
-
-def test_configurable_demographic_column_balances_targets(tmp_path: Path) -> None:
-    host_roster = tmp_path / "hosts.csv"
-    guest_roster = tmp_path / "guests_track.csv"
-    state_path = tmp_path / "state.json"
-    write_csv(host_roster, ["Name", "Discipline"], [["Host One", "biophysics"]])
-    write_csv(
-        guest_roster,
-        ["Name", "Discipline", "Track", "Outcome"],
-        [
-            ["G1", "biophysics", "A", ""],
-            ["G2", "astronomy", "A", ""],
-            ["G3", "condensed matter experimental", "A", ""],
-            ["G4", "condensed matter theory", "A", ""],
-            ["G5", "biophysics", "A", ""],
-            ["G6", "astronomy", "A", ""],
-            ["G7", "condensed matter experimental", "B", ""],
-            ["G8", "condensed matter theory", "B", ""],
-        ],
-    )
-
-    run_cli(
-        [
-            "init",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--guest-demographic-column",
-            "Track",
-            "--state",
-            str(state_path),
-        ]
-    )
-
-    selected_tracks: Counter[str] = Counter()
-    for event_index in (1, 2, 3, 4):
-        guest_out = tmp_path / f"guest_out_{event_index}.csv"
-        run_cli(
-            [
-                "plan",
-                "--host-roster",
-                str(host_roster),
-                "--guest-roster",
-                str(guest_roster),
-                "--guest-demographic-column",
-                "Track",
-                "--state",
-                str(state_path),
-                "--event-index",
-                str(event_index),
-                "--seed",
-                "2026",
-                "--cohort-seed",
-                "3030",
-                "--hosts-per-event",
-                "0",
-                "--guests-per-event",
-                "1",
-                "--guest-max-unique",
-                "8",
-                "--total-events",
-                "4",
-                "--host-out",
-                str(tmp_path / f"host_out_{event_index}.csv"),
-                "--host-wait",
-                str(tmp_path / f"host_wait_{event_index}.csv"),
-                "--guest-out",
-                str(guest_out),
-                "--guest-wait",
-                str(tmp_path / f"guest_wait_{event_index}.csv"),
-            ]
-        )
-        selected = read_column(guest_out, "name")
-        selected_track = read_column(guest_out, "track")
-        selected_tracks.update(selected_track)
-
-        set_guest_outcomes_csv(guest_roster, attended=selected, no_show=[])
-        run_cli(
-            [
-                "record",
-                "--state",
-                str(state_path),
-                "--event-index",
-                str(event_index),
-                "--guest-roster",
-                str(guest_roster),
-            ]
-        )
-
-    assert selected_tracks["A"] == 3
-    assert selected_tracks["B"] == 1
-
-
-def test_record_requires_guest_outcomes_for_selected(tmp_path: Path) -> None:
-    host_roster = tmp_path / "hosts.csv"
-    guest_roster = tmp_path / "guests.csv"
-    state_path = tmp_path / "state.json"
-    make_host_roster(host_roster)
-    make_guest_roster(guest_roster)
-
-    run_cli(
-        [
-            "init",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-        ]
-    )
-    run_cli(
-        [
-            "plan",
-            "--host-roster",
-            str(host_roster),
-            "--guest-roster",
-            str(guest_roster),
-            "--state",
-            str(state_path),
-            "--event-index",
-            "1",
-            "--seed",
-            "10",
-            "--cohort-seed",
-            "20",
-            "--hosts-per-event",
-            "1",
-            "--guests-per-event",
-            "2",
-            "--total-events",
-            "4",
-            "--host-out",
-            str(tmp_path / "host_out.csv"),
-            "--host-wait",
-            str(tmp_path / "host_wait.csv"),
-            "--guest-out",
-            str(tmp_path / "guest_out.csv"),
-            "--guest-wait",
-            str(tmp_path / "guest_wait.csv"),
-        ]
-    )
-
-    with pytest.raises(ValueError, match="Missing guest outcomes"):
-        cli_main(
-            [
-                "record",
-                "--state",
-                str(state_path),
-                "--event-index",
-                "1",
-                "--guest-roster",
-                str(guest_roster),
-            ]
-        )
-
-
-def test_xlsx_workbook_two_sheet_flow(tmp_path: Path) -> None:
-    from openpyxl import Workbook, load_workbook
-
-    workbook_path = tmp_path / "planner_inputs.xlsx"
+def make_workbook(path: Path) -> None:
     wb = Workbook()
 
     ws = wb.active
@@ -607,115 +30,517 @@ def test_xlsx_workbook_two_sheet_flow(tmp_path: Path) -> None:
     ws.append(["Name", "Discipline"])
     ws.append(["Host A", "biophysics"])
     ws.append(["Host B", "astronomy"])
+    ws.append(["Host C", "condensed matter experimental"])
+    ws.append(["Host D", "condensed matter theory"])
+    ws.append(["Host E", "biophysics"])
 
     ws = wb.create_sheet("guest_roster")
-    ws.append(["Name", "Discipline", "Sex", "Outcome"])
-    ws.append(["Guest 1", "biophysics", "F", ""])
-    ws.append(["Guest 2", "astronomy", "M", ""])
-    ws.append(["Guest 3", "condensed matter experimental", "F", ""])
-    ws.append(["Guest 4", "condensed matter theory", "M", ""])
-    wb.save(workbook_path)
+    ws.append(["Name", "Discipline", "Sex"])
+    ws.append(["Guest A", "biophysics", "F"])
+    ws.append(["Guest B", "astronomy", "M"])
+    ws.append(["Guest C", "condensed matter experimental", "F"])
+    ws.append(["Guest D", "condensed matter theory", "M"])
+    ws.append(["Guest E", "biophysics", "F"])
+    ws.append(["Guest F", "astronomy", "M"])
+    ws.append(["Guest G", "condensed matter experimental", "F"])
+    ws.append(["Guest H", "condensed matter theory", "M"])
+    wb.save(path)
 
-    state_path = tmp_path / "state.json"
+
+def read_plan_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        return [{key: (value or "") for key, value in row.items()} for row in reader]
+
+
+def write_plan_rows(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_init_defaults_to_data_paths_and_seed_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workbook = tmp_path / "planner_inputs.xlsx"
+    make_workbook(workbook)
+    monkeypatch.chdir(tmp_path)
+
+    run_cli(["init", "--inputs", str(workbook), "--seed-key", "42"])
+
+    state_path = tmp_path / "data" / "state.json"
+    plan_csv = tmp_path / "data" / "lunch_plan.csv"
+    assert state_path.exists()
+    assert plan_csv.exists()
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["_meta"]["seed_key"] == 42
+    assert isinstance(state["_meta"]["generated_seed"], int)
+
+
+def test_plan_writes_single_csv_for_selected_and_waitlist(tmp_path: Path) -> None:
+    workbook = tmp_path / "planner_inputs.xlsx"
+    make_workbook(workbook)
+    state_path = tmp_path / "data" / "state.json"
+    plan_csv = tmp_path / "data" / "lunch_plan.csv"
+
     run_cli(
         [
             "init",
-            "--host-roster",
-            str(workbook_path),
-            "--host-roster-sheet",
-            "host_roster",
-            "--guest-roster",
-            str(workbook_path),
-            "--guest-roster-sheet",
-            "guest_roster",
+            "--inputs",
+            str(workbook),
+            "--seed-key",
+            "7",
             "--state",
             str(state_path),
+            "--plan-csv",
+            str(plan_csv),
         ]
     )
-
-    guest_out = tmp_path / "guest_out.csv"
     run_cli(
         [
             "plan",
-            "--host-roster",
-            str(workbook_path),
-            "--host-roster-sheet",
-            "host_roster",
-            "--guest-roster",
-            str(workbook_path),
-            "--guest-roster-sheet",
-            "guest_roster",
+            "--inputs",
+            str(workbook),
             "--state",
             str(state_path),
+            "--plan-csv",
+            str(plan_csv),
             "--event-index",
             "1",
-            "--seed",
-            "77",
-            "--cohort-seed",
-            "88",
             "--hosts-per-event",
-            "1",
-            "--guests-per-event",
             "2",
-            "--total-events",
-            "4",
-            "--host-out",
-            str(tmp_path / "host_out.csv"),
-            "--host-wait",
-            str(tmp_path / "host_wait.csv"),
-            "--guest-out",
-            str(guest_out),
-            "--guest-wait",
-            str(tmp_path / "guest_wait.csv"),
+            "--guests-per-event",
+            "3",
         ]
     )
 
-    selected_guests = read_column(guest_out, "name")
-    assert len(selected_guests) == 2
+    rows = read_plan_rows(plan_csv)
+    assert rows
+    assert {row["event_index"] for row in rows} == {"1"}
+    assert {"host", "guest"} <= {row["role"] for row in rows}
+    assert {"selected", "waitlist"} <= {row["status"] for row in rows}
+    assert all("attendance" in row for row in rows)
 
-    wb2 = load_workbook(workbook_path)
-    ws2 = wb2["guest_roster"]
-    header = [cell.value for cell in ws2[1]]
-    name_idx = header.index("Name")
-    outcome_idx = header.index("Outcome")
-    for row in ws2.iter_rows(min_row=2):
-        guest_name = (row[name_idx].value or "")
-        row[outcome_idx].value = "attended" if guest_name in selected_guests else ""
-    wb2.save(workbook_path)
+    selected_guests = [
+        row for row in rows if row["role"] == "guest" and row["status"] == "selected"
+    ]
+    assert len(selected_guests) == 3
+
+
+def test_next_plan_applies_previous_attendance_from_same_csv(tmp_path: Path) -> None:
+    workbook = tmp_path / "planner_inputs.xlsx"
+    make_workbook(workbook)
+    state_path = tmp_path / "data" / "state.json"
+    plan_csv = tmp_path / "data" / "lunch_plan.csv"
 
     run_cli(
         [
-            "record",
+            "init",
+            "--inputs",
+            str(workbook),
+            "--seed-key",
+            "99",
             "--state",
             str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+        ]
+    )
+    run_cli(
+        [
+            "plan",
+            "--inputs",
+            str(workbook),
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
             "--event-index",
             "1",
-            "--guest-roster",
-            str(workbook_path),
-            "--guest-roster-sheet",
-            "guest_roster",
+            "--hosts-per-event",
+            "1",
+            "--guests-per-event",
+            "3",
+        ]
+    )
+
+    rows = read_plan_rows(plan_csv)
+    event_1_selected_guests = [
+        row
+        for row in rows
+        if row["event_index"] == "1"
+        and row["role"] == "guest"
+        and row["status"] == "selected"
+    ]
+    assert len(event_1_selected_guests) == 3
+
+    for idx, row in enumerate(event_1_selected_guests):
+        row["attendance"] = "no_show" if idx == 0 else "attended"
+    by_key = {
+        (row["event_index"], row["role"], row["status"], row["name"]): row
+        for row in rows
+    }
+    for row in event_1_selected_guests:
+        by_key[(row["event_index"], row["role"], row["status"], row["name"])] = row
+    write_plan_rows(plan_csv, list(by_key.values()))
+
+    run_cli(
+        [
+            "plan",
+            "--inputs",
+            str(workbook),
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+            "--hosts-per-event",
+            "1",
+            "--guests-per-event",
+            "3",
         ]
     )
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    for guest_name in selected_guests:
-        assert state["guests"][guest_name]["assigned_count"] == 1
+    no_show_guest = event_1_selected_guests[0]["name"]
+    assert state["guests"][no_show_guest]["assigned_count"] == 1
+    assert state["guests"][no_show_guest]["no_show_count"] == 1
+    assert state["_meta"]["last_recorded_event"] == 1
+    assert state["_meta"]["last_planned_event"] == 2
+
+    rows_after = read_plan_rows(plan_csv)
+    assert {"1", "2"} <= {row["event_index"] for row in rows_after}
+
+
+def test_cant_attend_and_waitlist_filled_are_applied(tmp_path: Path) -> None:
+    workbook = tmp_path / "planner_inputs.xlsx"
+    make_workbook(workbook)
+    state_path = tmp_path / "data" / "state.json"
+    plan_csv = tmp_path / "data" / "lunch_plan.csv"
+
+    run_cli(
+        [
+            "init",
+            "--inputs",
+            str(workbook),
+            "--seed-key",
+            "61",
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+        ]
+    )
+    run_cli(
+        [
+            "plan",
+            "--inputs",
+            str(workbook),
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+            "--event-index",
+            "1",
+            "--hosts-per-event",
+            "1",
+            "--guests-per-event",
+            "3",
+        ]
+    )
+
+    rows = read_plan_rows(plan_csv)
+    selected_rows = [
+        row
+        for row in rows
+        if row["event_index"] == "1"
+        and row["role"] == "guest"
+        and row["status"] == "selected"
+    ]
+    waitlist_rows = [
+        row
+        for row in rows
+        if row["event_index"] == "1"
+        and row["role"] == "guest"
+        and row["status"] == "waitlist"
+    ]
+    assert len(selected_rows) == 3
+    assert waitlist_rows
+
+    selected_rows[0]["attendance"] = "cant_attend"
+    selected_rows[1]["attendance"] = "attended"
+    selected_rows[2]["attendance"] = "no_show"
+    waitlist_rows[0]["attendance"] = "filled"
+    if len(waitlist_rows) > 1:
+        waitlist_rows[1]["attendance"] = "cant_attend"
+
+    by_key = {
+        (row["event_index"], row["role"], row["status"], row["name"]): row
+        for row in rows
+    }
+    for row in selected_rows + waitlist_rows:
+        key = (row["event_index"], row["role"], row["status"], row["name"])
+        by_key[key] = row
+    write_plan_rows(plan_csv, list(by_key.values()))
+
+    run_cli(
+        [
+            "plan",
+            "--inputs",
+            str(workbook),
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+            "--hosts-per-event",
+            "1",
+            "--guests-per-event",
+            "3",
+        ]
+    )
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    cant_attend_name = selected_rows[0]["name"]
+    attended_name = selected_rows[1]["name"]
+    no_show_name = selected_rows[2]["name"]
+    replacement_name = waitlist_rows[0]["name"]
+
+    assert state["guests"][cant_attend_name]["assigned_count"] == 0
+    assert state["guests"][cant_attend_name]["no_show_count"] == 0
+    assert state["guests"][cant_attend_name]["cooldown"] == 0
+    assert state["guests"][attended_name]["assigned_count"] == 1
+    assert state["guests"][no_show_name]["assigned_count"] == 1
+    assert state["guests"][no_show_name]["no_show_count"] == 1
+    assert state["guests"][no_show_name]["cooldown"] == 1
+    assert state["guests"][replacement_name]["assigned_count"] == 1
+    assert state["guests"][replacement_name]["no_show_count"] == 0
+    assert state["guests"][replacement_name]["cooldown"] == 0
+
+
+def test_normalize_outcome_accepts_extended_attendance_values() -> None:
+    assert normalize_outcome("can't attend") == "cant_attend"
+    assert normalize_outcome("declined") == "cant_attend"
+    assert normalize_outcome("filled in") == "filled"
+    assert normalize_outcome("replacement") == "filled"
+
+
+def test_plan_requires_attendance_for_prior_event(tmp_path: Path) -> None:
+    workbook = tmp_path / "planner_inputs.xlsx"
+    make_workbook(workbook)
+    state_path = tmp_path / "data" / "state.json"
+    plan_csv = tmp_path / "data" / "lunch_plan.csv"
+
+    run_cli(
+        [
+            "init",
+            "--inputs",
+            str(workbook),
+            "--seed-key",
+            "101",
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+        ]
+    )
+    run_cli(
+        [
+            "plan",
+            "--inputs",
+            str(workbook),
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+            "--event-index",
+            "1",
+            "--hosts-per-event",
+            "1",
+            "--guests-per-event",
+            "2",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Missing guest attendance"):
+        cli_main(
+            [
+                "plan",
+                "--inputs",
+                str(workbook),
+                "--state",
+                str(state_path),
+                "--plan-csv",
+                str(plan_csv),
+                "--event-index",
+                "2",
+                "--hosts-per-event",
+                "1",
+                "--guests-per-event",
+                "2",
+            ]
+        )
+
+
+def test_plan_excludes_hosts_from_guest_selection(tmp_path: Path) -> None:
+    workbook = tmp_path / "planner_inputs.xlsx"
+    wb = Workbook()
+
+    ws = wb.active
+    ws.title = "host_roster"
+    ws.append(["Name", "Discipline"])
+    ws.append(["Shared Name", "biophysics"])
+    ws.append(["Host B", "astronomy"])
+
+    ws = wb.create_sheet("guest_roster")
+    ws.append(["Name", "Discipline", "Sex"])
+    ws.append(["Shared Name", "biophysics", "F"])
+    ws.append(["Guest A", "astronomy", "M"])
+    ws.append(["Guest B", "condensed matter experimental", "F"])
+    ws.append(["Guest C", "condensed matter theory", "M"])
+    wb.save(workbook)
+
+    state_path = tmp_path / "data" / "state.json"
+    plan_csv = tmp_path / "data" / "lunch_plan.csv"
+
+    run_cli(
+        [
+            "start",
+            "--inputs",
+            str(workbook),
+            "--seed-key",
+            "88",
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+            "--event-index",
+            "1",
+            "--hosts-per-event",
+            "1",
+            "--guests-per-event",
+            "2",
+        ]
+    )
+
+    rows = read_plan_rows(plan_csv)
+    guest_names = {
+        row["name"]
+        for row in rows
+        if row["event_index"] == "1" and row["role"] == "guest"
+    }
+    assert "Shared Name" not in guest_names
+
+
+def test_seed_key_must_be_bounded() -> None:
+    with pytest.raises(SystemExit):
+        cli_main(["init", "--inputs", "x.xlsx", "--seed-key", "1001"])
+
+
+def test_missing_disciplines_are_split_equally(tmp_path: Path) -> None:
+    host_path = tmp_path / "hosts.csv"
+    with host_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Name", "Discipline"])
+        for idx in range(8):
+            writer.writerow([f"Host {idx}", ""])
+    hosts = load_host_roster(host_path)
+    host_counts = Counter(participant.discipline for participant in hosts)
+    assert set(host_counts.keys()) == set(DISCIPLINES)
+    assert sorted(host_counts.values()) == [2, 2, 2, 2]
+
+    guest_path = tmp_path / "guests.csv"
+    with guest_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Name", "Discipline", "Sex"])
+        writer.writerow(["Guest Explicit", "astronomy", "F"])
+        for idx in range(9):
+            writer.writerow([f"Guest {idx}", "", "M"])
+    guests = load_guest_roster(guest_path)
+    guest_counts = Counter(participant.discipline for participant in guests)
+    assert guest_counts["astronomy"] >= 1
+    assert max(guest_counts.values()) - min(guest_counts.values()) <= 1
+
+
+def test_start_initializes_and_plans_in_one_command(tmp_path: Path) -> None:
+    workbook = tmp_path / "planner_inputs.xlsx"
+    make_workbook(workbook)
+    state_path = tmp_path / "data" / "state.json"
+    plan_csv = tmp_path / "data" / "lunch_plan.csv"
+
+    run_cli(
+        [
+            "start",
+            "--inputs",
+            str(workbook),
+            "--seed-key",
+            "77",
+            "--state",
+            str(state_path),
+            "--plan-csv",
+            str(plan_csv),
+            "--event-index",
+            "1",
+            "--hosts-per-event",
+            "1",
+            "--guests-per-event",
+            "2",
+        ]
+    )
+
+    assert state_path.exists()
+    assert plan_csv.exists()
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["_meta"]["seed_key"] == 77
+    assert state["_meta"]["last_planned_event"] == 1
+    rows = read_plan_rows(plan_csv)
+    assert any(
+        row["event_index"] == "1"
+        and row["role"] == "guest"
+        and row["status"] == "selected"
+        for row in rows
+    )
+
+
+def test_women_to_parity_mode_targets_reach_parity_over_time() -> None:
+    counts = {"F": 8, "M": 52}
+
+    parity_weights = apply_demographic_mode(
+        demographic_counts=counts,
+        demographic_column="Sex",
+        demographic_mode=DEMOGRAPHIC_MODE_WOMEN_TO_PARITY,
+    )
+    proportional_weights = apply_demographic_mode(
+        demographic_counts=counts,
+        demographic_column="Sex",
+        demographic_mode=DEMOGRAPHIC_MODE_PROPORTIONAL,
+    )
+
+    assert parity_weights["F"] == parity_weights["M"] == 52
+    assert proportional_weights == counts
+
+    parity_cumulative: Counter[str] = Counter()
+    proportional_cumulative: Counter[str] = Counter()
+    for event_index in (1, 2, 3, 4):
+        parity_cumulative.update(
+            demographic_targets_for_event(event_index, 5, parity_weights)
+        )
+        proportional_cumulative.update(
+            demographic_targets_for_event(event_index, 5, proportional_weights)
+        )
+
+    assert parity_cumulative["F"] == parity_cumulative["M"]
+    assert proportional_cumulative["F"] < proportional_cumulative["M"]
 
 
 def test_legacy_cli_still_works(tmp_path: Path) -> None:
     roster = tmp_path / "legacy_roster.csv"
     state_path = tmp_path / "legacy_state.json"
-    write_csv(
-        roster,
-        ["Name", "Sex", "Discipline"],
-        [
-            ["Legacy A", "F", "biophysics"],
-            ["Legacy B", "M", "astronomy"],
-            ["Legacy C", "F", "condensed matter experimental"],
-            ["Legacy D", "M", "condensed matter theory"],
-            ["Legacy E", "F", "biophysics"],
-        ],
-    )
+    with roster.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Name", "Sex", "Discipline"])
+        writer.writerow(["Legacy A", "F", "biophysics"])
+        writer.writerow(["Legacy B", "M", "astronomy"])
+        writer.writerow(["Legacy C", "F", "condensed matter experimental"])
+        writer.writerow(["Legacy D", "M", "condensed matter theory"])
 
     repo_root = Path(__file__).resolve().parents[1]
     subprocess.run(
@@ -743,13 +568,12 @@ def test_legacy_cli_still_works(tmp_path: Path) -> None:
             "--wait",
             str(waitlist),
             "--seats",
-            "3",
+            "2",
             "--max-unique",
-            "4",
+            "3",
         ],
         cwd=repo_root,
         check=True,
     )
     assert selected.exists()
     assert waitlist.exists()
-
