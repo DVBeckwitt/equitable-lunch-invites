@@ -2,8 +2,15 @@
 i made this to plan lunches with a number of hosts and guests to keep it fair.
 It invites from one workbook and one seed key.
 
+## GUI preview
+
+![GUI screenshot placeholder](docs/gui.png)
+
+Place your GUI screenshot at `docs/gui.png`.
+
 Math specification:
 - Math explanation (PDF): [docs/explanation.pdf](docs/explanation.pdf)
+- Validation report (PDF): [docs/Validation.pdf](docs/Validation.pdf)
 
 ## Equity rules considered
 
